@@ -1,0 +1,23 @@
+# Dependencies
+node_modules
+
+# Build output
+build
+dist
+output
+
+# Logs
+*.log
+
+# --- Bí mật / Credentials (KHÔNG commit) ---
+.env
+credentials.json
+
+# --- File sinh tự động lúc chạy (Phase 2) ---
+state.json
+state.json.tmp
+
+# --- Lockfile của package manager khác (dự án dùng Bun) ---
+pnpm-lock.yaml
+package-lock.json
+yarn.lock

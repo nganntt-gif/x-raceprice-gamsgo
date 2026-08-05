@@ -1,0 +1,24 @@
+{
+  "name": "x-raceprice-gamsgo",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Race-price (auto-repricer) cho seller GamsGo — Phase 1: crawl giá đối thủ + tính giá mới (chưa sửa giá).",
+  "main": "src/dev-test.ts",
+  "type": "commonjs",
+  "license": "ISC",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "scripts": {
+    "dev-test": "bun run src/dev-test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.0",
+    "googleapis": "110.0.0",
+    "undici": "^6.19.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.8.0"
+  }
+}
