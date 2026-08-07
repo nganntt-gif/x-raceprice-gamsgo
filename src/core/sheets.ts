@@ -5,11 +5,22 @@
  * `x-raceprce-g2g-zerogap`, chỉ khác ở `COLUMN_ALIASES` để khớp đúng cột Setup của
  * Gamsgo (có thêm `SORT` + `LINK IMAGE`, không có `Seller Level`).
  *
- *   - readSetupRows(sheetName) : đọc tab Setup → SetupRowRaw[].
+ *   - readSetupRows(sheetName)      : đọc tab Setup → SetupRowRaw[].
+ *   - appendEditHistory(sheet, row) : ghi 1 dòng log mỗi lần sửa giá THẬT vào tab
+ *     "Edit History" — dùng từ `dev-apply.ts` sau khi `editPlanInfo()` thành công.
+ *     Header mượn phần lớn label của bản G2G (Game/Service/Name/.../Top Seller
+ *     Follow/Note/Time) để nhất quán giữa các tool của người dùng, nhưng 2 cột giá
+ *     đổi khác G2G theo yêu cầu: `Price Before`/`Price After` (giá TRƯỚC/SAU khi
+ *     sửa) thay vì `Enemy Price`/`My Price` (giá đối thủ/giá mình) — giá đối thủ
+ *     vẫn xem được qua cột `Note` (đã có sẵn "đối thủ giá=..." từ `pick.ts`, không
+ *     mất thông tin). Seller dùng merchant_id/merchant_name thay username, không
+ *     có `min_qty` vì Gamsgo không có ràng buộc đó.
  *
- * Phase 1 mới cần ĐỌC. `appendEditHistory()` (ghi tab "Edit History") CHƯA port —
- * chưa có gì để ghi vì chưa tìm ra endpoint sửa giá thật (xem mục "Việc còn hở"
- * trong ARCHITECTURE.md); sẽ thêm lại đúng lúc Phase 2 làm PUT giá.
+ *     KHÁC G2G ở 1 điểm quan trọng: G2G chỉ check "tab đã tồn tại chưa" rồi append
+ *     thẳng, giả định header luôn đúng nếu tab đã có. Ở đây kiểm CHẶT HƠN — nếu
+ *     tab đã tồn tại mà header dòng 1 KHÔNG khớp đúng `EDIT_HISTORY_HEADERS`, ném
+ *     lỗi rõ ràng thay vì append lẫn dưới header sai (bắt đúng case tab đang chứa
+ *     dữ liệu của 1 tool khác — đã gặp thật khi kiểm tra sheet của người dùng).
  *
  * Lưu ý hướng import: bản G2G định nghĩa `SetupRowRaw` NGAY TRONG sheets.ts rồi
  * cho target.ts import ngược lại. Ở dự án này `target.ts` đã có sẵn type đó từ
@@ -120,4 +131,80 @@ export async function readSetupRows(sheetName: string): Promise<SetupRowRaw[]> {
     });
   }
   return rows;
+}
+
+export const EDIT_HISTORY_HEADERS = [
+  'Game',
+  'Service',
+  'Name',
+  'Price Before',
+  'Price After',
+  'Top Seller Follow',
+  'Note',
+  'Time',
+];
+
+/**
+ * Ghi 1 dòng log sửa giá THẬT vào tab "Edit History" (append xuống cuối).
+ *
+ *  - Tab CHƯA tồn tại        → tự tạo tab + ghi header, rồi append.
+ *  - Tab tồn tại, header rỗng → ghi header, rồi append.
+ *  - Tab tồn tại, header KHÁC `EDIT_HISTORY_HEADERS` → ném lỗi rõ (kèm cả header
+ *    dự kiến và header thực tế) — KHÔNG tự ghi đè/đoán mò. Case này xảy ra khi
+ *    tab đang chứa dữ liệu của 1 tool khác (đã gặp thật) — người dùng cần tự dọn
+ *    hoặc đổi tên tab trước khi log thật lần đầu.
+ *  - Tab tồn tại, header khớp đúng → append thẳng.
+ */
+export async function appendEditHistory(
+  sheetName: string,
+  rowData: (string | number)[]
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+  const exists = spreadsheet.data.sheets?.some((s) => s.properties?.title === sheetName);
+
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
+      },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [EDIT_HISTORY_HEADERS] },
+    });
+  } else {
+    const headerResp = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A1:H1`,
+    });
+    const header = (headerResp.data.values?.[0] ?? []).map((h) => String(h ?? '').trim());
+    const headerEmpty = header.length === 0 || header.every((h) => h === '');
+
+    if (headerEmpty) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${sheetName}!A1`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [EDIT_HISTORY_HEADERS] },
+      });
+    } else if (!EDIT_HISTORY_HEADERS.every((h, i) => header[i] === h)) {
+      throw new Error(
+        `Tab "${sheetName}" đã tồn tại nhưng header dòng 1 KHÔNG khớp cột Gamsgo dự kiến. ` +
+          `Header dự kiến: [${EDIT_HISTORY_HEADERS.join(', ')}]. ` +
+          `Header hiện có: [${header.join(', ')}]. ` +
+          `Có thể tab này đang chứa dữ liệu của 1 tool khác — dọn hoặc đổi tên tab rồi chạy lại.`
+      );
+    }
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${sheetName}!A:H`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [rowData] },
+  });
 }

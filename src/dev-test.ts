@@ -37,14 +37,17 @@ async function main() {
   console.log(`Đã đọc ${rows.length} dòng từ Sheets.`);
 
   for (const row of rows) {
-    console.log(`\n=== Dòng ${row.rowIndex}: ${row.service} / ${row.name} ===`);
+    console.log(`\n=== Dòng ${row.rowIndex}: ${row.game} / ${row.name} ===`);
 
     if (!isRowEnabled(row)) {
       console.log('CHECK != 1 → bỏ qua');
       continue;
     }
 
-    const { target, error } = parseTarget(row);
+    const { target, error, warnings } = parseTarget(row);
+    if (warnings) {
+      for (const w of warnings) console.log(`⚠️  ${w}`);
+    }
     if (error || !target) {
       console.log(`LỖI parseTarget: ${error}`);
       continue;

@@ -9,6 +9,9 @@
  *   - `ownTypePlanId`  ← LINK EDIT dạng https://www.gamsgo.com/shop/<uuid>.
  *   - `sortKey`        ← cột SORT ('price' | 'recommend'), chỉ có ý nghĩa khi
  *                        mode='top'.
+ *   - `sellerIds`      ← cột Seller; MODE ghi rõ "race" + Seller trống → mặc
+ *                        định bám CNLTeam (`DEFAULT_RACE_SELLER_ID`), xem
+ *                        `isExplicitRaceMode`.
  */
 
 /** Một dòng cấu hình thô từ tab Setup (đã map theo tên cột, chưa parse logic). */
@@ -50,10 +53,19 @@ export interface RaceTarget {
   blacklist: string[]; // merchant_id
 }
 
-/** "0,01" / "19.27" → number. Hỗ trợ dấu phẩy thập phân kiểu VN. Rỗng → null. */
+/**
+ * "0,01" / "19.27" → number. Hỗ trợ dấu phẩy thập phân kiểu VN. Rỗng → null.
+ *
+ * Bắt buộc khớp NGUYÊN chuỗi bằng regex trước khi `parseFloat` — `parseFloat`
+ * thuần chỉ đọc PHẦN ĐẦU hợp lệ rồi bỏ qua rác phía sau mà không báo gì (vd
+ * `parseFloat("133.o0")` = `133`, KHÔNG phải `NaN`) — đã gặp thật lúc verify: 1
+ * giá trị PRICE MIN gõ lẫn ký tự lẽ ra phải bị coi là lỗi vẫn lọt qua như số hợp
+ * lệ nếu chỉ dựa vào `Number.isFinite(parseFloat(...))`.
+ */
 function parseNum(raw: string): number | null {
   const s = (raw || '').trim().replace(/,/g, '.');
   if (s === '') return null;
+  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : null;
 }
@@ -84,6 +96,37 @@ function parseIdList(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/**
+ * Merchant mặc định cho MODE=race khi cột `Seller` bỏ trống — seller CNLTeam.
+ * Chỉ áp dụng khi cột MODE ghi RÕ RÀNG "race" (xem `isExplicitRaceMode`) — KHÔNG
+ * áp dụng khi MODE để trống + Seller để trống (case đó vẫn suy luận 'top' như cũ,
+ * tránh âm thầm biến các dòng 'top' chưa điền Seller thành 'race' bám CNLTeam
+ * ngoài ý muốn). Seller này có ĐƯỢC BÁM THẬT hay không còn phụ thuộc nó có đang
+ * bán biến thể đó không — `pickCompetitor()` (pick.ts) đã tự bỏ qua nếu không
+ * tìm thấy trong pool, không cần thêm logic riêng ở đây.
+ */
+const DEFAULT_RACE_SELLER_ID = 'f58a591c-68e8-dada-ab1b-856a52ed11f9'; // CNLTeam
+
+/** MODE ghi rõ ràng là race (chữ "race" hoặc số "0") — không tính case suy luận từ Seller trống. */
+function isExplicitRaceMode(raw: string): boolean {
+  const m = (raw || '').trim().toLowerCase();
+  return m === 'race' || m === '0';
+}
+
+/**
+ * `merchant_id` của GamsGo luôn có dạng UUID (8-4-4-4-12 hex, đã xác nhận qua mọi
+ * dữ liệu thật crawl được) — dùng để phát hiện SỚM lỗi gõ nhầm ở cột Seller/
+ * SELLER_BLACK LIST (thiếu/dư ký tự, dán nhầm chuỗi khác...) mà KHÔNG cần crawl gì
+ * cả. Chỉ CẢNH BÁO (không chặn dòng như PRICE MIN) — hậu quả nhẹ hơn nhiều: 1 entry
+ * gõ sai chỉ khiến chính entry đó không loại/bám được ai, không phải "mất cả sàn
+ * giá" như PRICE MIN sai.
+ */
+const MERCHANT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function findMalformedIds(ids: string[]): string[] {
+  return ids.filter((id) => !MERCHANT_ID_RE.test(id));
+}
+
 export function isRowEnabled(row: SetupRowRaw): boolean {
   return /^(1|true|yes|on|x)$/i.test((row.check || '').trim());
 }
@@ -108,9 +151,14 @@ function parseSortKey(raw: string): SortKey {
 
 /**
  * Parse 1 dòng Setup → RaceTarget. Trả về { target } nếu hợp lệ, hoặc { error }
- * nếu thiếu dữ liệu bắt buộc (LINK CRAWL / LINK IMAGE / LINK EDIT / Price step).
+ * nếu thiếu/sai dữ liệu BẮT BUỘC (LINK CRAWL / LINK IMAGE / LINK EDIT / Price step
+ * / PRICE MIN có giá trị nhưng không parse được số). `warnings` (nếu có) là các
+ * vấn đề KHÔNG chặn dòng (Seller/SELLER_BLACK LIST có entry không đúng dạng
+ * merchant_id) — dòng vẫn chạy, caller tự in cảnh báo ra cho người vận hành biết.
  */
-export function parseTarget(row: SetupRowRaw): { target?: RaceTarget; error?: string } {
+export function parseTarget(
+  row: SetupRowRaw
+): { target?: RaceTarget; error?: string; warnings?: string[] } {
   const linkCrawl = (row.linkCrawl || '').trim();
   const typePlanImage = (row.linkImage || '').trim();
   const ownTypePlanId = extractOwnTypePlanId(row.linkEdit);
@@ -124,7 +172,40 @@ export function parseTarget(row: SetupRowRaw): { target?: RaceTarget; error?: st
     };
   if (priceStep === null) return { error: `dòng ${row.rowIndex}: Price step không hợp lệ` };
 
-  const sellerIds = parseIdList(row.seller);
+  // PRICE MIN có giá trị nhưng KHÔNG parse được số → CHẶN DÒNG (khác 2 warning dưới).
+  // Lý do khác biệt: nếu âm thầm coi là "không có sàn" (như trước đây), MODE=top mất
+  // hẳn reset rule mà không ai biết — rủi ro bán lỗ không kiểm soát. Trống thật (không
+  // gõ gì) vẫn hợp lệ = không sàn, đúng thiết kế cũ.
+  const priceMinRaw = (row.priceMin || '').trim();
+  if (priceMinRaw !== '' && parseNum(row.priceMin) === null) {
+    return {
+      error:
+        `dòng ${row.rowIndex}: PRICE MIN "${row.priceMin}" không parse được thành số — ` +
+        `sửa lại hoặc để trống hẳn (trống = không có sàn giá, đây là lựa chọn hợp lệ).`,
+    };
+  }
+
+  let sellerIds = parseIdList(row.seller);
+  if (sellerIds.length === 0 && isExplicitRaceMode(row.mode)) {
+    sellerIds = [DEFAULT_RACE_SELLER_ID];
+  }
+  const blacklist = parseIdList(row.sellerBlackList);
+
+  const warnings: string[] = [];
+  const badSellerIds = findMalformedIds(sellerIds);
+  if (badSellerIds.length > 0) {
+    warnings.push(
+      `dòng ${row.rowIndex}: cột Seller có giá trị không đúng dạng merchant_id (UUID): ` +
+        `[${badSellerIds.join(', ')}] — kiểm tra lại có gõ nhầm không.`
+    );
+  }
+  const badBlacklistIds = findMalformedIds(blacklist);
+  if (badBlacklistIds.length > 0) {
+    warnings.push(
+      `dòng ${row.rowIndex}: cột SELLER_BLACK LIST có giá trị không đúng dạng merchant_id (UUID): ` +
+        `[${badBlacklistIds.join(', ')}] — entry này sẽ KHÔNG loại được ai, kiểm tra lại có gõ nhầm không.`
+    );
+  }
 
   return {
     target: {
@@ -141,7 +222,8 @@ export function parseTarget(row: SetupRowRaw): { target?: RaceTarget; error?: st
       priceStep,
       priceStepDecimals: countStepDecimals(row.priceStep),
       priceMin: parseNum(row.priceMin),
-      blacklist: parseIdList(row.sellerBlackList),
+      blacklist,
     },
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }

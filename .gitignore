@@ -12,6 +12,7 @@ output
 # --- Bí mật / Credentials (KHÔNG commit) ---
 .env
 credentials.json
+cookies/
 
 # --- File sinh tự động lúc chạy (Phase 2) ---
 state.json
